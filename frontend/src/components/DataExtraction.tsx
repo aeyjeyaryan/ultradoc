@@ -3,7 +3,7 @@ import { Table, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE as string;
 
 interface DataExtractionProps {
   disabled: boolean;

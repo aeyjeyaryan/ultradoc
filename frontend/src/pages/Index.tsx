@@ -5,7 +5,7 @@ import DocumentUpload from "@/components/DocumentUpload";
 import AskQuestion from "@/components/AskQuestion";
 import DataExtraction from "@/components/DataExtraction";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE as string;
 
 interface UploadResult {
   filename: string;
