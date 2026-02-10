@@ -22,7 +22,6 @@ load_dotenv()
 
 app = FastAPI(title="Ultra Doc-Intelligence API", version="1.0.0")
 
-# CORS for frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,16 +30,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global storage
 vector_store = None
 current_document_name = None
 
-# Initialize embeddings (using free HuggingFace embeddings)
 embeddings = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
 
-# Pydantic models
 class QuestionRequest(BaseModel):
     question: str = Field(..., description="Question about the document")
     
@@ -153,7 +149,6 @@ async def upload_document(file: UploadFile = File(...)):
     """Upload and process a logistics document"""
     global vector_store, current_document_name
     
-    # Validate file type
     allowed_extensions = ['pdf', 'docx', 'doc', 'txt']
     file_ext = file.filename.split('.')[-1].lower()
     if file_ext not in allowed_extensions:
@@ -162,7 +157,6 @@ async def upload_document(file: UploadFile = File(...)):
             detail=f"File type not supported. Allowed: {', '.join(allowed_extensions)}"
         )
     
-    # Save temporary file
     with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_ext}') as tmp:
         content = await file.read()
         tmp.write(content)
@@ -192,7 +186,6 @@ async def upload_document(file: UploadFile = File(...)):
         }
     
     finally:
-        # Clean up temp file
         os.unlink(tmp_path)
 
 
@@ -207,7 +200,6 @@ async def ask_question(request: QuestionRequest):
             detail="No document uploaded. Please upload a document first."
         )
     
-    # Retrieve relevant chunks
     retriever = vector_store.as_retriever(
         search_type="similarity",
         search_kwargs={"k": 4}
@@ -215,7 +207,6 @@ async def ask_question(request: QuestionRequest):
     
     retrieved_docs = retriever.get_relevant_documents(request.question)
     
-    # Guardrail: Check if we have any relevant context
     if not retrieved_docs:
         return AnswerResponse(
             answer="Not found in document - no relevant information available.",
@@ -224,8 +215,7 @@ async def ask_question(request: QuestionRequest):
             metadata={"guardrail": "no_context_found"}
         )
     
-    # Initialize LLM (using Gemini via Google API)
-    # Note: In production, use environment variable for API key
+
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         temperature=0,
@@ -258,7 +248,6 @@ Answer (be specific and cite relevant details):"""
         return_source_documents=True
     )
     
-    # Get answer
     try:
         result = qa_chain({"query": request.question})
         answer = result["result"]
@@ -268,7 +257,6 @@ Answer (be specific and cite relevant details):"""
         answer = f"Error generating answer: {str(e)}"
         source_docs = retrieved_docs
     
-    # Calculate confidence
     confidence = calculate_confidence(source_docs, answer, request.question)
     
     # Guardrail: Low confidence threshold
@@ -301,18 +289,15 @@ async def extract_structured_data():
             detail="No document uploaded. Please upload a document first."
         )
     
-    # Get all document content
     all_docs = vector_store.get()
     full_text = " ".join([doc for doc in all_docs['documents']])
     
-    # Initialize LLM
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         temperature=0,
         google_api_key=os.getenv("GEMINI_API_KEY")
     )
     
-    # Extraction prompt
     extraction_prompt = f"""Extract the following shipment information from this logistics document. Return ONLY valid JSON with these exact fields. Use null for missing information.
 
 Document text:
@@ -339,7 +324,6 @@ Return ONLY the JSON, no other text:"""
         response = llm.invoke(extraction_prompt)
         result_text = response.content
         
-        # Extract JSON from response
         json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
         if json_match:
             extracted_data = json.loads(json_match.group())
@@ -349,7 +333,6 @@ Return ONLY the JSON, no other text:"""
         return StructuredData(**extracted_data)
     
     except Exception as e:
-        # Return empty structure if extraction fails
         return StructuredData()
 
 
