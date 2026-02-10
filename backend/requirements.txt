@@ -13,3 +13,4 @@ python-docx
 chromadb
 sentence-transformers
 python-dotenv
+langchain-chroma 

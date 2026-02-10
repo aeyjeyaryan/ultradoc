@@ -7,15 +7,15 @@ import tempfile
 import json
 from datetime import datetime
 import re
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
-from langchain.schema import Document as LangchainDocument
+from langchain_core.documents import Document as LangchainDocument
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -205,7 +205,7 @@ async def ask_question(request: QuestionRequest):
         search_kwargs={"k": 4}
     )
     
-    retrieved_docs = retriever.get_relevant_documents(request.question)
+    retrieved_docs = retriever.invoke(request.question)
     
     if not retrieved_docs:
         return AnswerResponse(
