@@ -7,6 +7,7 @@ import tempfile
 import json
 from datetime import datetime
 import re
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -16,11 +17,12 @@ from langchain_core.documents import Document as LangchainDocument
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains import RetrievalQA
 from langchain_core.prompts import PromptTemplate
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="Ultra Doc-Intelligence API", version="1.0.0")
+app = FastAPI(title="Ultra Doc-Intelligence API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,11 +34,40 @@ app.add_middleware(
 
 vector_store = None
 current_document_name = None
+embeddings = None  
 
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
+def get_embeddings():
+    """
+    Lazy load embeddings only when needed.
+    Uses HuggingFace embeddings with proper 2025 import.
+    """
+    global embeddings
+    if embeddings is None:
+        try:
+            embeddings = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                model_kwargs={'device': 'cpu'},
+                encode_kwargs={'normalize_embeddings': True}
+            )
+            print("✅ HuggingFace embeddings loaded successfully")
+        except Exception as e:
+            print(f"⚠️ Failed to load HuggingFace embeddings: {e}")
+            # Fallback to Google embeddings if available
+            try:
+                from langchain_google_genai import GoogleGenerativeAIEmbeddings
+                embeddings = GoogleGenerativeAIEmbeddings(
+                    model="models/embedding-001",
+                    google_api_key=os.getenv("GEMINI_API_KEY")
+                )
+                print("✅ Google embeddings loaded as fallback")
+            except Exception as e2:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Could not initialize any embeddings. Error: {str(e2)}"
+                )
+    return embeddings
 
+# Pydantic models
 class QuestionRequest(BaseModel):
     question: str = Field(..., description="Question about the document")
     
@@ -81,10 +112,8 @@ def load_document(file_path: str, filename: str) -> List[LangchainDocument]:
 
 def chunk_document(documents: List[LangchainDocument]) -> List[LangchainDocument]:
     """
-    Intelligent chunking strategy for logistics documents:
-    - Smaller chunks for better precision
-    - Overlap to maintain context
-    - Preserve semantic boundaries
+    Intelligent chunking strategy for logistics documents.
+    Uses RecursiveCharacterTextSplitter from langchain_text_splitters (2025).
     """
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=500,
@@ -117,24 +146,22 @@ def calculate_confidence(
         scores = [doc.metadata.get('score', 0) for doc in retrieved_docs]
         retrieval_score = sum(scores) / len(scores) if scores else 0
     else:
-        # Default high score if we got results
         retrieval_score = 0.8
     
-    # Factor 2: Answer completeness (non-empty, reasonable length)
+    # Factor 2: Answer completeness
     completeness_score = 0.0
     if answer and len(answer) > 10:
         completeness_score = min(len(answer) / 100, 1.0)
     
-    # Factor 3: Keyword overlap between question and sources
+    # Factor 3: Keyword overlap
     question_keywords = set(question.lower().split())
     source_text = " ".join([doc.page_content for doc in retrieved_docs]).lower()
     overlap = len([k for k in question_keywords if k in source_text]) / max(len(question_keywords), 1)
     
-    # Factor 4: Check if answer indicates uncertainty
+    # Factor 4: Uncertainty penalty
     uncertainty_phrases = ["not found", "unclear", "don't know", "cannot find", "no information"]
     uncertainty_penalty = 0.3 if any(phrase in answer.lower() for phrase in uncertainty_phrases) else 0
     
-    # Weighted combination
     confidence = (
         retrieval_score * 0.4 +
         completeness_score * 0.3 +
@@ -142,6 +169,12 @@ def calculate_confidence(
     ) - uncertainty_penalty
     
     return max(0.0, min(1.0, confidence))
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Startup event - embeddings loaded lazily on first use"""
+    print("Embeddings will load on first document upload")
 
 
 @app.post("/upload")
@@ -169,12 +202,14 @@ async def upload_document(file: UploadFile = File(...)):
         # Chunk document
         chunks = chunk_document(documents)
         
-        # Create vector store
+        # Create vector store with lazy-loaded embeddings (2025 import: langchain_chroma)
+        print("📦 Loading embeddings model...")
         vector_store = Chroma.from_documents(
             documents=chunks,
-            embedding=embeddings,
+            embedding=get_embeddings(),
             collection_name="logistics_docs"
         )
+        print("✅ Vector store created successfully")
         
         current_document_name = file.filename
         
@@ -205,8 +240,9 @@ async def ask_question(request: QuestionRequest):
         search_kwargs={"k": 4}
     )
     
-    retrieved_docs = retriever.invoke(request.question)
+    retrieved_docs = retriever.get_relevant_documents(request.question)
     
+    # Guardrail: Check if we have any relevant context
     if not retrieved_docs:
         return AnswerResponse(
             answer="Not found in document - no relevant information available.",
@@ -215,14 +251,14 @@ async def ask_question(request: QuestionRequest):
             metadata={"guardrail": "no_context_found"}
         )
     
-
+    # Initialize LLM (using Gemini)
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         temperature=0,
         google_api_key=os.getenv("GEMINI_API_KEY")
     )
     
-    # Create RAG prompt
+    # Create RAG prompt (using langchain_core.prompts)
     prompt_template = """You are an AI assistant helping with logistics document analysis.
 
 Answer the question based ONLY on the following context from the document. If the answer is not in the context, say "Not found in document".
@@ -248,15 +284,16 @@ Answer (be specific and cite relevant details):"""
         return_source_documents=True
     )
     
+    # Get answer
     try:
         result = qa_chain({"query": request.question})
         answer = result["result"]
         source_docs = result.get("source_documents", retrieved_docs)
     except Exception as e:
-        # Fallback if LLM fails
         answer = f"Error generating answer: {str(e)}"
         source_docs = retrieved_docs
     
+    # Calculate confidence
     confidence = calculate_confidence(source_docs, answer, request.question)
     
     # Guardrail: Low confidence threshold
@@ -289,15 +326,18 @@ async def extract_structured_data():
             detail="No document uploaded. Please upload a document first."
         )
     
+    # Get all document content
     all_docs = vector_store.get()
     full_text = " ".join([doc for doc in all_docs['documents']])
     
+    # Initialize LLM
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         temperature=0,
         google_api_key=os.getenv("GEMINI_API_KEY")
     )
     
+    # Extraction prompt
     extraction_prompt = f"""Extract the following shipment information from this logistics document. Return ONLY valid JSON with these exact fields. Use null for missing information.
 
 Document text:
@@ -324,6 +364,7 @@ Return ONLY the JSON, no other text:"""
         response = llm.invoke(extraction_prompt)
         result_text = response.content
         
+        # Extract JSON from response
         json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
         if json_match:
             extracted_data = json.loads(json_match.group())
@@ -336,14 +377,27 @@ Return ONLY the JSON, no other text:"""
         return StructuredData()
 
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for deployment platforms"""
+    return {
+        "status": "healthy",
+        "service": "ultra-doc-intelligence",
+        "version": "2.0.0",
+        "embeddings_loaded": embeddings is not None
+    }
+
+
 @app.get("/status")
 async def get_status():
     """Get system status"""
     return {
         "status": "online",
+        "version": "2.0.0",
         "document_loaded": current_document_name is not None,
         "current_document": current_document_name,
-        "vector_store_initialized": vector_store is not None
+        "vector_store_initialized": vector_store is not None,
+        "embeddings_loaded": embeddings is not None
     }
 
 
@@ -352,14 +406,16 @@ async def root():
     """API root"""
     return {
         "message": "Ultra Doc-Intelligence API",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "status": "online",
+        "langchain_version": "2025 (updated imports)",
         "endpoints": {
             "upload": "POST /upload - Upload a document",
             "ask": "POST /ask - Ask questions about the document",
             "extract": "POST /extract - Extract structured data",
-            "status": "GET /status - Check system status"
+            "status": "GET /status - Check system status",
+            "health": "GET /health - Health check"
         }
     }
-
 
 
